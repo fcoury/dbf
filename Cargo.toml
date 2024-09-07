@@ -1,0 +1,8 @@
+[package]
+name = "yawl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.87"
+byteorder = "1.5.0"
