@@ -1,10 +1,11 @@
+#![allow(unused)]
 use std::io::{BufRead, BufReader, Read, Seek};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
 #[derive(Debug, Clone)]
 pub struct Header {
-    pub version: u8,
+    pub file_type: FileType,
     pub has_memo: bool,
     pub last_update: (u8, u8, u8),
     pub num_records: u32,
@@ -14,6 +15,91 @@ pub struct Header {
     pub encryption_flag: u8,
     pub mdx_flag: u8,
     pub language_driver_id: u8,
+}
+
+impl Header {
+    pub fn read<R: Read + Seek>(reader: &mut R) -> anyhow::Result<Self> {
+        let info = reader.read_u8()?;
+        let file_type_id = info & 0b0000_0111;
+        let has_memo = info & 0b1000_0000 != 0;
+
+        let mut buffer = [0; 3];
+        reader.read_exact(&mut buffer)?;
+        let year = buffer[0];
+        let month = buffer[1];
+        let day = buffer[2];
+
+        let num_records = reader.read_u32::<LittleEndian>()?;
+        let header_bytes = reader.read_u16::<LittleEndian>()?;
+        let record_bytes = reader.read_u16::<LittleEndian>()?;
+        reader.seek(std::io::SeekFrom::Current(2))?;
+        let incomplete_tx = reader.read_u8()?;
+        let encryption_flag = reader.read_u8()?;
+        reader.seek(std::io::SeekFrom::Current(12))?;
+        let mdx_flag = reader.read_u8()?;
+        let language_driver_id = reader.read_u8()?;
+        reader.seek(std::io::SeekFrom::Current(2))?;
+
+        let Some(file_type) = FileType::from_u8(file_type_id) else {
+            anyhow::bail!("Unknown file type: {}", file_type_id);
+        };
+
+        if file_type != FileType::DBase3Plus && file_type != FileType::DBase3PlusWithMemo {
+            anyhow::bail!("Unsupported file type: {file_type_id} - {:?}", file_type);
+        }
+
+        Ok(Self {
+            file_type,
+            has_memo,
+            last_update: (year, month, day),
+            num_records,
+            header_bytes,
+            record_bytes,
+            incomplete_tx,
+            encryption_flag,
+            mdx_flag,
+            language_driver_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[repr(u8)]
+pub enum FileType {
+    FoxBase = 0x02,
+    DBase3Plus = 0x03,
+    VisualFoxPro = 0x30,
+    VisualFoxProAutoIncrement = 0x31,
+    VisualFoxProVar = 0x32,
+    DBase4SQLTable = 0x43,
+    DBase4SQLSystem = 0x63,
+    DBase3PlusWithMemo = 0x83,
+    DBase4WithMemo = 0x8B,
+    DBase4SQLTableWithMemo = 0xCB,
+    FoxBaseWithMemo = 0xF5,
+    HiPerSix = 0xE5,
+    FoxBase2 = 0xFB,
+}
+
+impl FileType {
+    pub fn from_u8(val: u8) -> Option<FileType> {
+        match val {
+            0x02 => Some(FileType::FoxBase),
+            0x03 => Some(FileType::DBase3Plus),
+            0x30 => Some(FileType::VisualFoxPro),
+            0x31 => Some(FileType::VisualFoxProAutoIncrement),
+            0x32 => Some(FileType::VisualFoxProVar),
+            0x43 => Some(FileType::DBase4SQLTable),
+            0x63 => Some(FileType::DBase4SQLSystem),
+            0x83 => Some(FileType::DBase3PlusWithMemo),
+            0x8B => Some(FileType::DBase4WithMemo),
+            0xCB => Some(FileType::DBase4SQLTableWithMemo),
+            0xF5 => Some(FileType::FoxBaseWithMemo),
+            0xE5 => Some(FileType::HiPerSix),
+            0xFB => Some(FileType::FoxBase2),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,44 +172,6 @@ impl File {
     }
 }
 
-impl Header {
-    pub fn read<R: Read + Seek>(reader: &mut R) -> anyhow::Result<Self> {
-        let info = reader.read_u8()?;
-        let version = info & 0b0000_0111;
-        let has_memo = info & 0b1000_0000 != 0;
-
-        let mut buffer = [0; 3];
-        reader.read_exact(&mut buffer)?;
-        let year = buffer[0];
-        let month = buffer[1];
-        let day = buffer[2];
-
-        let num_records = reader.read_u32::<LittleEndian>()?;
-        let header_bytes = reader.read_u16::<LittleEndian>()?;
-        let record_bytes = reader.read_u16::<LittleEndian>()?;
-        reader.seek(std::io::SeekFrom::Current(2))?;
-        let incomplete_tx = reader.read_u8()?;
-        let encryption_flag = reader.read_u8()?;
-        reader.seek(std::io::SeekFrom::Current(12))?;
-        let mdx_flag = reader.read_u8()?;
-        let language_driver_id = reader.read_u8()?;
-        reader.seek(std::io::SeekFrom::Current(2))?;
-
-        Ok(Self {
-            version,
-            has_memo,
-            last_update: (year, month, day),
-            num_records,
-            header_bytes,
-            record_bytes,
-            incomplete_tx,
-            encryption_flag,
-            mdx_flag,
-            language_driver_id,
-        })
-    }
-}
-
 impl Field {
     pub fn read<R: Read + Seek>(reader: &mut R) -> anyhow::Result<Self> {
         let mut buffer = [0; 11];
@@ -153,10 +201,11 @@ impl Field {
 }
 
 #[derive(Debug, Clone)]
-enum DbfType {
+pub enum DbfType {
     Character(String),
     Numeric(String),
-    Logical(bool),
+    Float(String),
+    Logical(String),
     Date(String),
     Memo(String),
 }
@@ -174,14 +223,12 @@ impl Record {
 
             let value = match field.typ {
                 'C' => DbfType::Character(String::from_utf8_lossy(&buffer).to_string()),
-                'N' => DbfType::Numeric(String::from_utf8(buffer)?),
                 'D' => DbfType::Date(String::from_utf8(buffer)?),
-                'M' => DbfType::Date(String::from_utf8(buffer)?),
-                // 'N' => {
-                //     let value = String::from_utf8(buffer)?;
-                //     DbfType::Numeric(value.trim().parse::<f64>()?)
-                // }
-                _ => unimplemented!(),
+                'F' => DbfType::Float(String::from_utf8(buffer)?),
+                'L' => DbfType::Logical(String::from_utf8(buffer)?),
+                'M' => DbfType::Memo(String::from_utf8(buffer)?),
+                'N' => DbfType::Numeric(String::from_utf8(buffer)?),
+                _ => anyhow::bail!("Unsupported field type: {}", field.typ),
             };
 
             data.push(value);
